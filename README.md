@@ -1,25 +1,39 @@
 # Kioskforge
 
-**Declarative Raspberry Pi kiosk provisioning** — a modern, general-purpose replacement for bespoke fleet imagers like `spondulix-imager`.
+Provision a Raspberry Pi as a locked-down kiosk: full-screen Chromium, optional Docker Compose backend, host firewall, and Tailscale for remote access.
 
-Flash Raspberry Pi OS with [Raspberry Pi Imager](https://www.raspberrypi.com/software/), inject a config overlay onto the boot partition, boot once. Kioskforge configures Chromium kiosk mode (Wayland/labwc or X11), optional Docker Compose, firewall, serial udev rules, and Tailscale.
+Define everything in one YAML file. Flash Pi OS, inject the overlay onto the boot partition, boot once — provisioning runs automatically.
 
-## Why this exists
+## Stack
 
-`spondulix-imager` (private, `teamsatosys`) was built for Satosys kiosk fleet deployment circa 2024. It used:
+| Layer | What Kioskforge configures |
+|-------|---------------------------|
+| **Display** | Chromium in kiosk mode (Wayland/labwc on Bookworm+, X11 fallback) |
+| **Application** | Docker Compose service(s) on localhost, displayed in the browser |
+| **Network** | `ufw` firewall — SSH and Tailscale only by default |
+| **Remote access** | Tailscale mesh VPN (auth key via environment variable) |
+| **Hardware** | USB serial udev aliases for attached devices |
+| **Identity** | Hostname, SSH hardening, optional read-only rootfs |
 
-| Original approach | Problem today |
-|---|---|
-| [packer-arm](https://github.com/mkaczanowski/packer-arm) full image builds | Heavy, slow, QEMU/ARM build chain; hard to maintain |
-| DietPi + Bullseye base images | Pi OS Bookworm/Trixie uses **Wayland/labwc**; X11/openbox scripts break |
-| `rc.local` first boot | Deprecated; systemd + Imager `firstrun.sh` is standard |
-| `chromium-browser` package | Renamed to `chromium` on modern Debian |
-| Hardcoded Spondulix Docker images + GHCR tokens | Product-specific; secrets were committed to boot config |
-| Packer templates per hardware SKU | Raspberry Pi Imager customization + YAML is enough for most fleets |
+Typical deployment:
 
-**What still had merit:** first-boot wizard for field techs, boot-partition config, kiosk autostart, iptables/ufw, Docker Compose sidecar, udev serial aliases, Tailscale for remote fleet access.
+```
+┌─────────────────────────────────────┐
+│  Chromium (kiosk, fullscreen)       │
+│  → http://localhost:8080            │
+├─────────────────────────────────────┤
+│  Docker Compose (your app stack)    │
+├─────────────────────────────────────┤
+│  ufw  │  Tailscale  │  SSH (key)   │
+└─────────────────────────────────────┘
+         Raspberry Pi OS
+```
 
-Kioskforge keeps those ideas, drops the product coupling, and targets **post-flash injection** instead of rebuilding `.img` files.
+## Requirements
+
+- **Host machine** — macOS or Linux, for running the CLI and mounting the SD card
+- **Raspberry Pi** — Pi 3 or newer, 1 GB+ RAM
+- **Raspberry Pi Imager** — flash [Raspberry Pi OS (64-bit)](https://www.raspberrypi.com/software/) with hostname, user, WiFi, and SSH configured there
 
 ## Install
 
@@ -32,40 +46,42 @@ pipx install git+https://github.com/ram0verflow/kioskforge.git
 ## Quick start
 
 ```bash
-# 1. Validate config
+# Validate config
 kioskforge validate examples/minimal.yaml
 
-# 2. See provisioning plan
-kioskforge plan examples/minimal.yaml
+# Preview what first boot will apply
+kioskforge plan examples/fleet-edge.yaml
 
-# 3. Flash Pi OS with Raspberry Pi Imager (set user, WiFi, SSH there)
+# Flash SD card with Raspberry Pi Imager, mount boot partition, inject
+kioskforge inject examples/fleet-edge.yaml \
+  --boot-mount /media/$USER/bootfs \
+  --compose examples/docker-compose.yml
 
-# 4. Mount boot partition and inject
-kioskforge inject examples/minimal.yaml --boot-mount /Volumes/bootfs
-
-# 5. Boot the Pi
-ssh pi@kiosk.local 'journalctl -u kioskforge-firstboot --no-pager'
+# Boot the Pi and verify
+ssh pi@your-hostname.local journalctl -u kioskforge-firstboot --no-pager
 ```
 
-## Example config
+## Configuration
 
 ```yaml
 kiosk:
-  url: https://dashboard.example.com
-  display: wayland          # wayland (Pi OS Bookworm+) or x11
-  tab_rotate_seconds: 30      # optional multi-tab rotation
+  url: http://localhost:8080       # shown fullscreen in Chromium
+  display: wayland                 # wayland | x11
+  tab_rotate_seconds: 0            # rotate tabs if multiple URLs
 
 system:
   hostname: lobby-kiosk
-  hostname_from_mac: false  # true → kiosk-a1b2c3 from NIC MAC
+  hostname_from_mac: false         # true → kiosk-a1b2c3 from NIC MAC
   username: pi
   ssh_password_auth: false
   ssh_port: 22
+  read_only_root: false
 
 firewall:
   enabled: true
   allow_ssh: true
-  allow_interfaces: [tailscale0]
+  allow_interfaces:
+    - tailscale0                   # allow all traffic on Tailscale iface
 
 docker:
   enabled: true
@@ -73,55 +89,62 @@ docker:
   compose_file: docker-compose.yml
 
 tailscale:
-  enabled: true             # set KIOSKFORGE_TAILSCALE_AUTHKEY on first boot
+  enabled: true                    # requires KIOSKFORGE_TAILSCALE_AUTHKEY at boot
 
 serial_devices:
   - symlink: ttyDevice1
     usb_serial: "00000001"
+    group: dialout
+    mode: "0660"
 
-first_boot_wizard: true       # interactive URL/hostname on console
+first_boot_wizard: false           # true → interactive hostname/URL on console
 packages: [curl]
+env:
+  APP_ENV: production
+post_install:
+  - systemctl restart kioskforge-docker
 ```
 
-Inject with Docker Compose bundle:
+### Example compose file
 
-```bash
-kioskforge inject examples/fleet-edge.yaml \
-  --boot-mount /media/$USER/bootfs \
-  --compose examples/docker-compose.yml
+```yaml
+# examples/docker-compose.yml
+services:
+  app:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    restart: unless-stopped
 ```
+
+Pass it at inject time with `--compose examples/docker-compose.yml`.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `kioskforge validate <config>` | Parse and validate YAML |
-| `kioskforge plan <config>` | Show what first boot will apply |
-| `kioskforge generate <config> -o ./out` | Build overlay directory (manual copy) |
-| `kioskforge inject <config> -b <boot-mount>` | Write overlay + `firstrun.sh` hook |
+| `kioskforge plan <config>` | Show provisioning plan |
+| `kioskforge generate <config> -o ./out` | Build overlay directory for manual copy |
+| `kioskforge inject <config> -b <boot-mount>` | Write overlay and first-boot hook to SD card |
 
-## Migration from spondulix-imager
+## How it works
 
-| spondulix-imager | kioskforge |
-|---|---|
-| `rpi_image.json` / `pi_image.json` (Packer) | Flash with Raspberry Pi Imager + `kioskforge inject` |
-| `/boot/spondulix_config` with secrets | Never put secrets in git; use Imager SSH keys + env vars |
-| `setup_wizard.sh` (Satosys branded) | `first_boot_wizard: true` (generic) |
-| `docker-compose.yml` → ghcr.io/teamsatosys/* | Your own compose file via `--compose` |
-| `99-com.rules` ttyCoin/ttyBill | `serial_devices:` in YAML |
-| `iptable-rules.sh` | `firewall:` section (ufw) |
-| DietPi chromium autostart | Wayland labwc autostart (Bookworm+) |
+1. **Flash** — Raspberry Pi Imager writes the OS and basic settings (user, WiFi, SSH keys).
+2. **Inject** — Kioskforge copies a `kioskforge/` overlay to `/boot/firmware/` and registers a one-shot `firstrun.sh` hook.
+3. **First boot** — A systemd oneshot installs packages, applies firewall rules, starts Docker Compose, joins Tailscale, and configures Chromium kiosk autostart.
+4. **Done** — The oneshot disables itself. Subsequent boots go straight to the kiosk.
 
-## Security notes
+## Security
 
-- **Rotate any secrets** that were ever in `spondulix_config` (Tailscale keys, GitHub PATs).
-- Pass Tailscale auth keys at runtime via `KIOSKFORGE_TAILSCALE_AUTHKEY` — not in YAML committed to git.
-- Use Raspberry Pi Imager for SSH public-key auth instead of password login.
+- Do **not** commit Tailscale auth keys or registry tokens to YAML. Set `KIOSKFORGE_TAILSCALE_AUTHKEY` in the systemd environment or export it before first boot.
+- Use Raspberry Pi Imager to configure **SSH public-key auth**; keep `ssh_password_auth: false`.
+- The default firewall denies all incoming traffic except SSH and configured interfaces (e.g. `tailscale0`).
+- Enable `read_only_root: true` for unattended public deployments to reduce SD card corruption risk.
 
 ## Development
 
 ```bash
-cd kioskforge
 pip install -e ".[dev]"
 pytest
 ruff check .
@@ -130,7 +153,3 @@ ruff check .
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Credits
-
-Evolved from the Satosys Spondulix kiosk fleet tooling. Repackaged as general-purpose open source by [ram0verflow](https://github.com/ram0verflow).
