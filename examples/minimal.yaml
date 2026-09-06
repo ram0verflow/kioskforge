@@ -1,0 +1,18 @@
+kiosk:
+  url: https://example.com/dashboard
+  display: wayland
+  tab_rotate_seconds: 0
+
+system:
+  hostname: lobby-kiosk
+  username: pi
+  ssh_password_auth: false
+
+firewall:
+  enabled: true
+  allow_ssh: true
+
+first_boot_wizard: false
+
+packages:
+  - curl

@@ -1,0 +1,15 @@
+[Unit]
+Description=Kioskforge first-boot provisioning
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/kioskforge/firstboot-done
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/kioskforge.env
+Environment=KIOSKFORGE_TAILSCALE_AUTHKEY=
+ExecStart=/bin/bash {{overlay_path}}/scripts/install-systemd.sh {{overlay_path}} {{username}}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

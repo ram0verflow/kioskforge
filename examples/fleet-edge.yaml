@@ -1,0 +1,39 @@
+kiosk:
+  url: http://localhost:8080
+  display: wayland
+
+system:
+  hostname: edge-kiosk
+  hostname_from_mac: true
+  username: pi
+  ssh_port: 22
+  ssh_password_auth: false
+
+firewall:
+  enabled: true
+  allow_ssh: true
+  allow_interfaces:
+    - tailscale0
+
+docker:
+  enabled: true
+  working_dir: /home/pi/kiosk-app
+  compose_file: docker-compose.yml
+
+tailscale:
+  enabled: true
+
+serial_devices:
+  - symlink: ttyDevice1
+    usb_serial: "00000001"
+    group: dialout
+    mode: "0660"
+
+first_boot_wizard: true
+
+packages:
+  - curl
+  - ca-certificates
+
+post_install:
+  - echo "post-install complete" >> /var/log/kioskforge.log
